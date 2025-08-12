@@ -315,8 +315,8 @@ static int zynqmp_ipi_send_data(struct mbox_chan *chan, void *data)
 	if (mchan->chan_type == IPI_MB_CHNL_TX) {
 		/* Send request message */
 		if (msg && msg->len > mchan->req_buf_size && mchan->req_buf) {
-			dev_err(dev, "channel %d message length %u > max %lu\n",
-				mchan->chan_type, (unsigned int)msg->len,
+			dev_err(dev, "channel %d message length %zu > max %zu\n",
+				mchan->chan_type, msg->len,
 				mchan->req_buf_size);
 			return -EINVAL;
 		}
@@ -328,8 +328,8 @@ static int zynqmp_ipi_send_data(struct mbox_chan *chan, void *data)
 	} else {
 		/* Send response message */
 		if (msg && msg->len > mchan->resp_buf_size && mchan->resp_buf) {
-			dev_err(dev, "channel %d message length %u > max %lu\n",
-				mchan->chan_type, (unsigned int)msg->len,
+			dev_err(dev, "channel %d message length %zu > max %zu\n",
+				mchan->chan_type, msg->len,
 				mchan->resp_buf_size);
 			return -EINVAL;
 		}
