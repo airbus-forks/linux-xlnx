@@ -11,6 +11,7 @@
 #include <linux/mailbox_client.h>
 #include <linux/mailbox/zynqmp-ipi-message.h>
 #include <linux/kfifo.h>
+#include <linux/spinlock.h>
 
 #define DRIVER_NAME "zynqmp-ipi-mbox-client"
 #define DRIVER_VERSION "1.0"
@@ -20,9 +21,9 @@
 #define ZYNQMP_IPI_CLIENT_FIFO_SIZE (ZYNQMP_IPI_CLIENT_FIFO_MSGS * ZYNQMP_IPI_CLIENT_MSG_SIZE)
 
 struct zynqmp_ipi_client_counters {
-	int rx;
-	int tx;
-	int dropped;
+	atomic_t rx;
+	atomic_t tx;
+	atomic_t dropped;
 };
 
 struct zynqmp_ipi_client_message {
@@ -40,9 +41,10 @@ struct zynqmp_ipi_client_info {
 	struct zynqmp_ipi_client_counters counters;
 	struct kfifo fifo;
 	wait_queue_head_t wq;
+	spinlock_t fifo_lock;
 };
 
-static int devn;
+static atomic_t devn;
 
 /**
  * Display device name
@@ -83,9 +85,9 @@ static ssize_t counters_show(struct device *dev,
 {
 	struct zynqmp_ipi_client_info *info = (struct zynqmp_ipi_client_info *) dev_get_drvdata(dev->parent);
 
-	return sysfs_emit(buf, "rx: %d, tx: %d, dropped: %d.\n", info->counters.rx,
-								 info->counters.tx,
-								 info->counters.dropped);
+	return sysfs_emit(buf, "rx: %d, tx: %d, dropped: %d.\n", atomic_read(&info->counters.rx),
+								 atomic_read(&info->counters.tx),
+								 atomic_read(&info->counters.dropped));
 }
 
 /**
@@ -101,8 +103,10 @@ static ssize_t reset_store(struct device *dev, struct device_attribute *attr,
 {
 	struct zynqmp_ipi_client_info *info = (struct zynqmp_ipi_client_info *)dev_get_drvdata(dev->parent);
 
+	spin_lock(&info->fifo_lock);
 	/* reset rx fifo */
 	kfifo_reset(&info->fifo);
+	spin_unlock(&info->fifo_lock);
 
 	return count;
 }
@@ -142,9 +146,12 @@ static ssize_t zynqmp_ipi_client_read(struct file *file, char __user *user_buffe
 	struct miscdevice *dev = (struct miscdevice *) file->private_data;
 	struct zynqmp_ipi_client_info *info = (struct zynqmp_ipi_client_info *) dev_get_drvdata(dev->parent);
 	unsigned int copied;
-	int rc;
+	int rc, len;
 
-	if (kfifo_len(&info->fifo) == 0) {
+	spin_lock(&info->fifo_lock);
+	len = kfifo_len(&info->fifo);
+	spin_unlock(&info->fifo_lock);
+	if (len == 0) {
 		if (file->f_flags & O_NONBLOCK)
 			return -EAGAIN;
 	}
@@ -154,7 +161,9 @@ static ssize_t zynqmp_ipi_client_read(struct file *file, char __user *user_buffe
 	if (rc)
 		return rc;
 
+	spin_lock(&info->fifo_lock);
 	rc = kfifo_to_user(&info->fifo, user_buffer, size, &copied);
+	spin_unlock(&info->fifo_lock);
 	if (!rc)
 		rc = copied;
 
@@ -176,7 +185,7 @@ static ssize_t zynqmp_ipi_client_write(struct file *file, const char __user *use
 {
 	struct miscdevice *dev = (struct miscdevice *) file->private_data;
 	struct zynqmp_ipi_client_info *info = (struct zynqmp_ipi_client_info *) dev_get_drvdata(dev->parent);
-	struct zynqmp_ipi_client_message msg;
+	struct zynqmp_ipi_client_message msg = {0};
 	int rc;
 
 	if (!size)
@@ -184,9 +193,8 @@ static ssize_t zynqmp_ipi_client_write(struct file *file, const char __user *use
 	if (size > ZYNQMP_IPI_CLIENT_MSG_SIZE)
 		size = ZYNQMP_IPI_CLIENT_MSG_SIZE;
 
-	rc = copy_from_user(&msg.data, user_buffer, size);
-	if (rc < 0)
-		return -EINVAL;
+	if (copy_from_user(&msg.data, user_buffer, size))
+		return -EFAULT;
 
 	dev_dbg(info->dev, "send %zu bytes.\n", size);
 
@@ -199,7 +207,7 @@ static ssize_t zynqmp_ipi_client_write(struct file *file, const char __user *use
 		return rc;
 	}
 
-	info->counters.tx++;
+	atomic_fetch_inc(&info->counters.tx);
 
 	return size;
 }
@@ -232,15 +240,13 @@ static void zynqmp_ipi_client_rx_callback(struct mbox_client *cl, void *mssg)
 	if (msg->len) {
 		dev_dbg(info->dev, "%ld bytes received.\n", msg->len);
 
-		//print_hex_dump(KERN_DEBUG, "raw data: ", DUMP_PREFIX_ADDRESS, 4, 1, msg->data, msg->len, true);
-
 		/* put data in fifo */
-		rc = kfifo_in(&info->fifo, msg->data, msg->len);
+		rc = kfifo_in_spinlocked(&info->fifo, msg->data, msg->len, &info->fifo_lock);
 		if (!rc) {
 			dev_warn(info->dev, "rx fifo full, message is dropped.\n");
-			info->counters.dropped++;
+			atomic_fetch_inc(&info->counters.dropped);
 		} else
-			info->counters.rx++;
+			atomic_fetch_inc(&info->counters.rx);
 
 		/* wake up reader(s) if any */
 		wake_up_interruptible(&info->wq);
@@ -305,9 +311,10 @@ static int zynqmp_ipi_client_probe(struct platform_device *pdev)
 
 	info->dev = &pdev->dev;
 	info->name = node->full_name;
-	info->counters.rx = 0;
-	info->counters.tx = 0;
-	info->counters.dropped = 0;
+	atomic_set(&info->counters.rx, 0);
+	atomic_set(&info->counters.tx, 0);
+	atomic_set(&info->counters.dropped, 0);
+	spin_lock_init(&info->fifo_lock);
 
 	if (of_find_property(pdev->dev.of_node, "mboxes", NULL)) {
 		/* setup mailbox channel client (non-blocking mode) */
@@ -342,7 +349,7 @@ static int zynqmp_ipi_client_probe(struct platform_device *pdev)
 
 	/* misc device */
 	info->miscdev.minor = MISC_DYNAMIC_MINOR;
-	info->miscdev.name = devm_kasprintf(&pdev->dev, GFP_KERNEL, "mbox%d", devn++);
+	info->miscdev.name = devm_kasprintf(&pdev->dev, GFP_KERNEL, "mbox%d", atomic_fetch_inc(&devn));
 	info->miscdev.fops = &zynqmp_ipi_client_fops;
 	info->miscdev.parent = info->dev;
 	info->miscdev.groups = zynqmp_ipi_client_groups;
@@ -429,7 +436,7 @@ static struct platform_driver zynqmp_ipi_client_driver = {
 static int __init zynqmp_ipi_client_init(void)
 {
 	/* clear device number */
-	devn = 0;
+	atomic_set(&devn, 0);
 
 	return platform_driver_register(&zynqmp_ipi_client_driver);
 }
