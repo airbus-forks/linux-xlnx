@@ -12,6 +12,7 @@
 #include <linux/mailbox/zynqmp-ipi-message.h>
 #include <linux/kfifo.h>
 #include <linux/spinlock.h>
+#include <linux/mutex.h>
 
 #define DRIVER_NAME "zynqmp-ipi-mbox-client"
 #define DRIVER_VERSION "1.0"
@@ -42,6 +43,9 @@ struct zynqmp_ipi_client_info {
 	struct kfifo fifo;
 	wait_queue_head_t wq;
 	spinlock_t fifo_lock;
+	spinlock_t tx_lock;
+	struct mutex tx_mutex;
+	struct mutex rx_mutex;
 };
 
 static atomic_t devn;
@@ -102,11 +106,12 @@ static ssize_t reset_store(struct device *dev, struct device_attribute *attr,
 			 const char *buf, size_t count)
 {
 	struct zynqmp_ipi_client_info *info = (struct zynqmp_ipi_client_info *)dev_get_drvdata(dev->parent);
+	unsigned long flags;
 
-	spin_lock(&info->fifo_lock);
+	spin_lock_irqsave(&info->fifo_lock, flags);
 	/* reset rx fifo */
 	kfifo_reset(&info->fifo);
-	spin_unlock(&info->fifo_lock);
+	spin_unlock_irqrestore(&info->fifo_lock, flags);
 
 	return count;
 }
@@ -145,27 +150,32 @@ static ssize_t zynqmp_ipi_client_read(struct file *file, char __user *user_buffe
 {
 	struct miscdevice *dev = (struct miscdevice *) file->private_data;
 	struct zynqmp_ipi_client_info *info = (struct zynqmp_ipi_client_info *) dev_get_drvdata(dev->parent);
+	unsigned long flags;
 	unsigned int copied;
-	int rc, len;
+	int rc;
 
-	spin_lock(&info->fifo_lock);
-	len = kfifo_len(&info->fifo);
-	spin_unlock(&info->fifo_lock);
-	if (len == 0) {
-		if (file->f_flags & O_NONBLOCK)
-			return -EAGAIN;
+	if (mutex_lock_interruptible(&info->rx_mutex))
+		return -EINTR;
+
+	if (kfifo_is_empty(&info->fifo)) {
+		if (file->f_flags & O_NONBLOCK) {
+			rc = -EAGAIN;
+			goto release_mutex;
+		}
+
+		rc = wait_event_interruptible(info->wq, !kfifo_is_empty(&info->fifo));
+		if (rc)
+			goto release_mutex;
 	}
 
-	/* sleep if kfifo is empty */
-	rc = wait_event_interruptible(info->wq, kfifo_len(&info->fifo) != 0);
-	if (rc)
-		return rc;
-
-	spin_lock(&info->fifo_lock);
+	spin_lock_irqsave(&info->fifo_lock, flags);
 	rc = kfifo_to_user(&info->fifo, user_buffer, size, &copied);
-	spin_unlock(&info->fifo_lock);
+	spin_unlock_irqrestore(&info->fifo_lock, flags);
 	if (!rc)
 		rc = copied;
+
+release_mutex:
+	mutex_unlock(&info->rx_mutex);
 
 	return rc;
 }
@@ -186,7 +196,11 @@ static ssize_t zynqmp_ipi_client_write(struct file *file, const char __user *use
 	struct miscdevice *dev = (struct miscdevice *) file->private_data;
 	struct zynqmp_ipi_client_info *info = (struct zynqmp_ipi_client_info *) dev_get_drvdata(dev->parent);
 	struct zynqmp_ipi_client_message msg = {0};
+	unsigned long flags;
 	int rc;
+
+	if (mutex_lock_interruptible(&info->tx_mutex))
+		return -EINTR;
 
 	if (!size)
 		return size;
@@ -201,13 +215,17 @@ static ssize_t zynqmp_ipi_client_write(struct file *file, const char __user *use
 	/* force length to max supported */
 	msg.len = ZYNQMP_IPI_CLIENT_MSG_SIZE;
 
+	spin_lock_irqsave(&info->tx_lock, flags);
 	rc = mbox_send_message(info->tx_chan, &msg);
+	spin_unlock_irqrestore(&info->tx_lock, flags);
 	if (rc < 0) {
 		dev_err(info->dev, "mbox_send_message failed (%d).\n", rc);
 		return rc;
 	}
 
 	atomic_fetch_inc(&info->counters.tx);
+
+	mutex_unlock(&info->tx_mutex);
 
 	return size;
 }
@@ -226,7 +244,7 @@ static const struct file_operations zynqmp_ipi_client_fops = {
 /**
  * Rx callback function
  *
- * Display message received
+ * Store message received in fifo and send acknowledge
  *
  * @cl: mailbox client
  * @mssg: pointer to the message received
@@ -235,6 +253,7 @@ static void zynqmp_ipi_client_rx_callback(struct mbox_client *cl, void *mssg)
 {
 	struct zynqmp_ipi_client_info *info = (struct zynqmp_ipi_client_info *)dev_get_drvdata(cl->dev);
 	struct zynqmp_ipi_message *msg = (struct zynqmp_ipi_message *)mssg;
+	unsigned long flags;
 	int rc;
 
 	if (msg->len) {
@@ -248,11 +267,13 @@ static void zynqmp_ipi_client_rx_callback(struct mbox_client *cl, void *mssg)
 		} else
 			atomic_fetch_inc(&info->counters.rx);
 
+		/* send ack in order to enable IRQ */
+		spin_lock_irqsave(&info->tx_lock, flags);
+		mbox_send_message(info->rx_chan, NULL);
+		spin_unlock_irqrestore(&info->tx_lock, flags);
+
 		/* wake up reader(s) if any */
 		wake_up_interruptible(&info->wq);
-
-		/* send ack in order to enable IRQ */
-		mbox_send_message(info->rx_chan, NULL);
 	}
 }
 
@@ -315,6 +336,9 @@ static int zynqmp_ipi_client_probe(struct platform_device *pdev)
 	atomic_set(&info->counters.tx, 0);
 	atomic_set(&info->counters.dropped, 0);
 	spin_lock_init(&info->fifo_lock);
+	spin_lock_init(&info->tx_lock);
+	mutex_init(&info->tx_mutex);
+	mutex_init(&info->rx_mutex);
 
 	if (of_find_property(pdev->dev.of_node, "mboxes", NULL)) {
 		/* setup mailbox channel client (non-blocking mode) */
