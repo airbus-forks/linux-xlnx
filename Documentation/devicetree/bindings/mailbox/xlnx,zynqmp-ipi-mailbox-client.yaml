@@ -1,0 +1,158 @@
+# SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+%YAML 1.2
+---
+$id: "http://devicetree.org/schemas/mailbox/xlnx,zynqmp-ipi-mailbox-client.yaml#"
+$schema: "http://devicetree.org/meta-schemas/core.yaml#"
+
+title: Xilinx IPI (Inter Processor Interrupt) mailbox client
+
+description: |
+  The Xilinx IPI (Inter Processor Interrupt) mailbox client allows to
+  receive/send messages through a char device via read/write operations.
+
+maintainers:
+  - Rémi Debord <remi.debord@airbus.com>
+
+properties:
+  compatible:
+    const: xlnx,zynqmp-ipi-mailbox-client
+    const: ads,xilinx-mailbox-client
+
+  mboxes:
+    description: |
+      Standard property to specify a mailbox
+
+      Refer to the zynqmp-ipi-mailbox documentation for client usage of this
+      property
+    maxItems: 1
+
+  mbox-names:
+    description: |
+      Refer to the zynqmp-ipi-mailbox documentation for client usage of this
+      property
+    items:
+      - const: tx
+      - const: rx
+
+additionalProperties: false
+
+required:
+  - compatible
+  - mboxes
+  - mbox-names
+
+examples:
+  - |
+    #include<dt-bindings/interrupt-controller/arm-gic.h>
+
+    amba {
+      #address-cells = <0x2>;
+      #size-cells = <0x2>;
+
+      mbox_client_rpu {
+        compatible = "xlnx,zynqmp-ipi-mailbox-client";
+        mboxes = <&ipi_mailbox_rpu0 0 &ipi_mailbox_rpu0 1>;
+        mbox-names = "tx", "rx";
+      };
+
+      zynqmp_mailbox {
+        compatible = "xlnx,zynqmp-ipi-mailbox";
+        interrupt-parent = <&gic>;
+        interrupts = <0 33 4>; /* IRQ 65 (IPI3) */
+        xlnx,ipi-id = <5>; /* local ID: APU (IPI3) */
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+
+        /* APU (IPI3) <-> RPU0 (IPI1) IPI mailbox controller (Versal) */
+        ipi_mailbox_rpu0: mailbox@ff3f0ac0 {
+          reg = <0xff3f0ac0 0x20>, /* src agent: IPI3, dest agent: IPI1 */
+                <0xff3f0ae0 0x20>,
+                <0xff3f0740 0x20>, /* src agent: IPI1, dest agent: IPI3 */
+                <0xff3f0760 0x20>;
+          reg-names = "local_request_region",
+                      "local_response_region",
+                      "remote_request_region",
+                      "remote_response_region";
+          #mbox-cells = <1>;
+          xlnx,ipi-id = <3>; /* remote ID: RPU (IPI1) */
+        };
+      };
+    };
+
+  - |
+    #include<dt-bindings/interrupt-controller/arm-gic.h>
+
+    amba {
+      #address-cells = <0x2>;
+      #size-cells = <0x2>;
+
+      mbox_client_rpu {
+        compatible = "xlnx,zynqmp-ipi-mailbox-client";
+        mboxes = <&ipi_mailbox_rpu0 0 &ipi_mailbox_rpu0 1>;
+        mbox-names = "tx", "rx";
+      };
+
+      zynqmp_mailbox {
+        compatible = "xlnx,zynqmp-ipi-mailbox";
+        interrupt-parent = <&gic>;
+        interrupts = <0 29 4>;
+        xlnx,ipi-id = <7>; /* Channel 7 (PL0) */
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+
+        /* APU (PL0) <-> RPU0 IPI (RPU0) mailbox controller (Zynq Ultrascale+) */
+        ipi_mailbox_rpu0: mailbox@ff990600 {
+          reg = <0xff990600 0x20>, /* Channel 7 request buffer */
+                <0xff990620 0x20>,
+                <0xff9900c0 0x20>, /* Channel 1 request buffer */
+                <0xff9900e0 0x20>;
+          reg-names = "local_request_region",
+                      "local_response_region",
+                      "remote_request_region",
+                      "remote_response_region";
+          #mbox-cells = <1>;
+          xlnx,ipi-id = <1>; /* Channel 1 (RPU0) */
+        };
+      };
+    };
+  - |
+    #include<dt-bindings/interrupt-controller/arm-gic.h>
+
+    amba {
+      #address-cells = <0x2>;
+      #size-cells = <0x2>;
+
+      mbox_client_rpu {
+        compatible = "xlnx,zynqmp-ipi-mailbox-client";
+        mboxes = <&ipi_mailbox_rpu0 0 &ipi_mailbox_rpu0 1>;
+        mbox-names = "tx", "rx";
+      };
+
+      zynqmp_mailbox {
+        compatible = "xlnx,zynqmp-ipi-mailbox";
+        interrupt-parent = <&gic>;
+        interrupts = <0 30 4>;
+        xlnx,ipi-id = <8>; /* Channel 8 (PL1) */
+        #address-cells = <1>;
+        #size-cells = <1>;
+        ranges;
+
+        /* APU (PL1) <-> RPU0 (RPU0) IPI mailbox controller (Zynq Ultrascale+) */
+        ipi_mailbox_rpu0: mailbox@ff990800 {
+          reg = <0xff990800 0x20>, /* Channel 8 request buffer */
+                <0xff990820 0x20>,
+                <0xff990100 0x20>, /* Channel 1 request buffer */
+                <0xff990120 0x20>;
+          reg-names = "local_request_region",
+                      "local_response_region",
+                      "remote_request_region",
+                      "remote_response_region";
+          #mbox-cells = <1>;
+          xlnx,ipi-id = <1>; /* Channel 1 (RPU0) */
+        };
+      };
+    };
+
+...

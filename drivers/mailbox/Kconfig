@@ -260,6 +260,15 @@ config ZYNQMP_IPI_MBOX
 	  message to the IPI buffer and will access the IPI control
 	  registers to kick the other processor or enquire status.
 
+config ZYNQMP_IPI_MBOX_CLIENT
+	tristate "Xilinx ZynqMP IPI Mailbox client"
+	depends on ZYNQMP_IPI_MBOX
+	default n
+	help
+	  Say yes here to add support for Xilinx IPI mailbox client driver.
+	  This mailbox client driver is used to send and receive short messages
+	  between processors with Xilinx ZynqMP IPI.
+
 config SUN6I_MSGBOX
 	tristate "Allwinner sun6i/sun8i/sun9i/sun50i Message Box"
 	depends on ARCH_SUNXI || COMPILE_TEST
